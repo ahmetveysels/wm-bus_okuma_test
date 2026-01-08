@@ -1,21 +1,12 @@
-# testrfidokuma
-
-A new Flutter project.
-
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+// Bize o zaman 2 tane raw g eliyor bir sayaç bilgileri bir de sayaç verileri değil mi ? evet ise o zaman bizim raw ı liste olarak tutmamız gerekiyor mu?
+// iki soru şeklinde sor durumuma göre
 
 
 
 flutter clean
 flutter pub get
+
+git init
+git add .
+git commit -m"tch ve qds okunuyor parse ediliyor"
+git push

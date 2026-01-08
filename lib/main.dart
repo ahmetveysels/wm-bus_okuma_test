@@ -5,17 +5,16 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:testrfidokuma/decode_page.dart';
-import 'package:testrfidokuma/wmbus_utils.dart';
 import 'package:usb_serial/usb_serial.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 // Kendi proje dosyaların
 import 'meter_model.dart';
 import 'module_config.dart';
-import 'wm_bus_parser.dart'; // Güncellediğimiz parser
-
-// decode_page.dart varsa import et, yoksa bu satırı sil ve butonu kaldır
-// import 'package:testrfidokuma/decode_page.dart';
+import 'wm_bus_parser.dart';
+// WMBusUtils sınıfı wm_bus_parser.dart veya wmbus_utils.dart içinde olabilir.
+// Eğer ayrı dosyadaysa import etmeyi unutmayın.
+import 'wmbus_utils.dart';
 
 void main() {
   runApp(
@@ -40,7 +39,6 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
   StreamSubscription<Uint8List>? _subscription;
 
   // --- Modül Listesi ---
-  // Not: ModuleConfig sınıfının ve alt sınıflarının tanımlı olduğunu varsayıyorum.
   final List<RFModuleConfig> _availableModules = [
     RadiocraftT1CConfig(),
     RadiocraftT1Config(),
@@ -70,7 +68,7 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
   final List<MeterReading> _readings = [];
 
   // Hedef Sayaç Listesi
-  final List<String> _targetSerials = ["67352271", "66946295", "67659800"];
+  final List<String> _targetSerials = [];
 
   bool _isConnected = false;
   bool _isScanning = false;
@@ -85,7 +83,6 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
     UsbSerial.usbEventStream!.listen((event) => _getPorts());
     _getPorts();
 
-    // Listeyi sırala
     _availableModules.sort((a, b) => a.sortId.compareTo(b.sortId));
     if (_availableModules.isNotEmpty) {
       _selectedModule = _availableModules.first;
@@ -95,7 +92,6 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
 
   void _resetMeterList() {
     _readings.clear();
-    // Başlangıçta boş kartları oluştur
     for (var serial in _targetSerials) {
       _readings.add(MeterReading(manufacturer: "", serialNumber: serial, deviceType: "", version: 0, encryption: "Bekleniyor", frameType: "", values: [], parseTime: DateTime.now()));
     }
@@ -158,7 +154,7 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
     }
   }
 
-  // --- KONFİGÜRASYON VE OKUMA ---
+  // --- KONFİGÜRASYON ---
   Future<void> _startReadingWithConfig() async {
     if (!_isConnected || _port == null) {
       _addLog("Önce USB Bağlantısını kurun!");
@@ -174,11 +170,9 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
 
     _addLog("${_selectedModule!.name} Başlatılıyor...");
 
-    // Komut gönderme ve bekleme fonksiyonu
     Future<bool> sendCommandAndWait(String hexCmd) async {
       try {
         _configCompleter = Completer<void>();
-        // WMBusUtils sınıfını eklediğimiz için bu metot artık çalışır
         List<int> bytes = WMBusUtils.hexToBytes(hexCmd);
         _addLog("TX: $hexCmd");
         if (_port != null) {
@@ -192,14 +186,12 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
       }
     }
 
-    // Komut Döngüsü
     bool success = true;
     for (String command in _selectedModule!.initCommands) {
       if (!_isConfiguring) {
         success = false;
         break;
       }
-
       bool sent = await sendCommandAndWait(command);
       if (!sent) _addLog("Uyarı: Onay alınamadı, devam ediliyor...");
       await Future.delayed(const Duration(milliseconds: 100));
@@ -237,19 +229,16 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
     String hexRaw = WMBusUtils.toHexString(data);
     _addLog("RX: $hexRaw");
 
-    // 1. Konfigürasyon Modu Cevapları
+    // 1. Konfigürasyon Modu
     if (_isConfiguring) {
       bool isConfigComplete = false;
-      String moduleName = _selectedModule?.name ?? "";
+      ModuleProtocol proto = _selectedModule?.protocol ?? ModuleProtocol.standard;
 
-      if (moduleName.contains("RC1180") || moduleName.contains("Radiocraft")) {
+      if (proto == ModuleProtocol.amber) {
+        // Amber genelde FF ile cevap döner (ACK)
+        if (data.isNotEmpty && data[0] == 0xFF) isConfigComplete = true;
+      } else if (proto == ModuleProtocol.radiocrafts) {
         if (data.contains(0x3E)) isConfigComplete = true; // '>'
-      } else if (moduleName.contains("AMBER") || moduleName.contains("Amber")) {
-        // Amber ACK: FF ...
-        if (data.isNotEmpty && data[0] == 0xFF) {
-          isConfigComplete = true;
-          _addLog("RX: Amber ACK (OK)");
-        }
       } else {
         if (data.isNotEmpty) isConfigComplete = true;
       }
@@ -260,37 +249,65 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
       return;
     }
 
-    // 2. Normal Tarama Modu
     if (!_isScanning) return;
 
     _rxBuffer.addAll(data);
-    if (_rxBuffer.length > 2048) {
+    if (_rxBuffer.length > 4096) {
       _addLog("Buffer temizlendi (Taşma)");
       _rxBuffer.clear();
     }
 
-    // Paket Ayıklama
+    // --- PROTOKOLE GÖRE AYRIŞTIRMA ---
+    ModuleProtocol proto = _selectedModule?.protocol ?? ModuleProtocol.standard;
+
+    // A. AMBER (Özel Durum: FF... veya Direkt Veri)
+    if (proto == ModuleProtocol.amber) {
+      // Amber şeffaf moddaysa direkt M-Bus verisi basar (Standard gibi).
+      // Ancak bazen FF ile başlayan komut/durum mesajı da atabilir.
+      while (_rxBuffer.isNotEmpty) {
+        if (_rxBuffer[0] == 0xFF) {
+          // Bu bir Amber sistem mesajıdır (ACK, Status vb.), M-Bus verisi değildir.
+          // C# mantığına göre bunu atlamalıyız. Genelde [1] byte uzunluktur.
+          if (_rxBuffer.length > 2) {
+            int cmdLen = _rxBuffer[1]; // Payload length
+            // Toplam: FF + Len + Payload + (Bazen +1 CS)
+            // Basitçe FF'i ve peşindekileri temizleyelim
+            _rxBuffer.removeAt(0);
+            continue;
+          } else {
+            break; // Veri eksik
+          }
+        }
+        // FF ile başlamıyorsa standart M-Bus paketidir. Aşağıdaki döngüye girmesi için break.
+        break;
+      }
+    }
+
+    // B. PAKET AYIKLAMA (Tüm Modüller İçin Ortak)
     while (_rxBuffer.isNotEmpty) {
       int startIndex = -1;
       int lengthByte = 0;
-      int frameOffset = 0; // Payload öncesi kaç byte var?
+      int frameOffset = 0;
 
-      String modName = _selectedModule?.name ?? "";
-
-      if (modName.contains("RC1180") || modName.contains("Radiocraft")) {
-        // Radyo modülleri genelde 0x68 ile başlar
+      // 1. RADIOCRAFTS (0x68 veya Length)
+      if (proto == ModuleProtocol.radiocrafts) {
         startIndex = _rxBuffer.indexOf(0x68);
         if (startIndex != -1 && _rxBuffer.length > startIndex + 1) {
           lengthByte = _rxBuffer[startIndex + 1];
           frameOffset = 2; // 68 + Len
-        }
-      } else {
-        // Amber: Genellikle direkt [Len] [C] [Man] ...
-        // Basit uzunluk kontrolü (10-250 arası)
-        if (_rxBuffer[0] > 10 && _rxBuffer[0] < 250) {
+        } else if (_rxBuffer.isNotEmpty && _rxBuffer[0] >= 10) {
           startIndex = 0;
           lengthByte = _rxBuffer[0];
           frameOffset = 1; // Sadece Len
+        }
+      }
+      // 2. STANDART / AMBER (Direkt Length)
+      else {
+        // M-Bus paketi min 10 byte olur. İlk byte uzunluktur.
+        if (_rxBuffer.isNotEmpty && _rxBuffer[0] > 9 && _rxBuffer[0] < 255) {
+          startIndex = 0;
+          lengthByte = _rxBuffer[0];
+          frameOffset = 1;
         } else {
           _rxBuffer.removeAt(0); // Çöp veri
           continue;
@@ -298,57 +315,43 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
       }
 
       if (startIndex == -1) break;
-
-      // Start öncesini temizle
       if (startIndex > 0) _rxBuffer.removeRange(0, startIndex);
 
-      // Paketin tamamı geldi mi?
-      // Amber (Mode 1) için Length byte payload uzunluğunu verir.
-      // Toplam paket = frameOffset + LengthByte
       int totalLen = frameOffset + lengthByte;
+      if (_rxBuffer.length < totalLen) break; // Paket tamamlanmadı
 
-      if (_rxBuffer.length < totalLen) break; // Bekle
-
-      // Paketi al
-      // Parser bizden sadece frame istiyor (Header + Data)
-      // RC1180 için [68, L, ...] kısmında 68 atılır, L ve sonrası gönderilir mi?
-      // Parser'ımız Header analizi için L, C, Man bekliyor.
-
-      List<int> frameForParser;
-      if (modName.contains("RC1180")) {
-        // RC1180 için 0x68'i atıp kalanı veriyoruz
-        frameForParser = _rxBuffer.sublist(1, totalLen);
-      } else {
-        // Amber zaten [L, C, ...] formatında
-        frameForParser = _rxBuffer.sublist(0, totalLen);
-      }
-
+      List<int> frameForParser = _rxBuffer.sublist(0, totalLen);
       _rxBuffer.removeRange(0, totalLen);
+
       _processParsedFrame(frameForParser);
     }
   }
 
   void _processParsedFrame(List<int> frameBytes) {
-    // Parser çağrısı
     MeterReading result = _parser.parseFrame(frameBytes);
 
     if (result.error != null) return;
     if (result.manufacturer == "UNK") return;
 
     setState(() {
-      // Listede var mı kontrol et
       int index = _readings.indexWhere((r) => r.serialNumber == result.serialNumber);
 
       if (index != -1) {
-        // Varsa güncelle
-        _readings[index] = result;
-        String valText = result.values.isNotEmpty ? "${result.values.first.value} ${result.values.first.unit}" : "Veri Yok";
-        _addLog("GÜNCEL: ${result.serialNumber} -> $valText");
+        // --- KRİTİK DÜZELTME: Veri Varsa Güncelle ---
+        if (result.values.isNotEmpty) {
+          _readings[index] = result;
+          String valText = "${result.values.first.value} ${result.values.first.unit}";
+          _addLog("GÜNCEL: ${result.serialNumber} -> $valText");
+        } else {
+          // Veri yoksa (Sinyal paketi), eski veriyi koru!
+          _addLog("SİNYAL: ${result.serialNumber} (Veri bloğu yok - Eski değer korundu)");
+        }
       } else {
-        // Listede yoksa ve geçerli bir okumaysa ekle
+        // Yeni sayaç
         if (result.serialNumber != "00000000") {
           _readings.add(result);
-          _addLog("YENİ: ${result.serialNumber} (${result.manufacturer})");
+          String info = result.values.isNotEmpty ? "Veri Var" : "Veri Bekleniyor...";
+          _addLog("YENİ: ${result.serialNumber} ($info)");
         }
       }
     });
@@ -368,6 +371,12 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      floatingActionButton: FloatingActionButton(
+        child: const Icon(Icons.usb),
+        onPressed: () {
+          Navigator.push(context, MaterialPageRoute(builder: (context) => const DecodePage()));
+        },
+      ),
       appBar: AppBar(
         title: const Text("W-MBus Okuyucu"),
         backgroundColor: Colors.indigo,
@@ -403,7 +412,6 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
                     itemBuilder: (ctx, i) => _buildMeterCard(_readings[i]),
                   ),
           ),
-          // Log Paneli
           InkWell(
             onTap: () => Clipboard.setData(ClipboardData(text: _logs.join('\n'))),
             child: Container(
@@ -423,13 +431,6 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
             ),
           ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        child: const Icon(Icons.usb),
-        onPressed: () {
-          // Eğer decode_page.dart varsa aç
-          Navigator.push(context, MaterialPageRoute(builder: (context) => const DecodePage()));
-        },
       ),
     );
   }
@@ -484,63 +485,56 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
 
   Widget _buildMeterCard(MeterReading r) {
     bool hasData = r.values.isNotEmpty;
-    return InkWell(
-      onTap: () {
-        // Detay sayfası eklenebilir
-        Clipboard.setData(ClipboardData(text: r.toString()));
-      },
-      child: Card(
-        elevation: 3,
-        margin: const EdgeInsets.all(8),
-        color: hasData ? Colors.green[50] : Colors.white,
-        child: Padding(
-          padding: const EdgeInsets.all(12.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text("SERİ: ${r.serialNumber}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                  Text(
-                    r.manufacturer,
-                    style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey),
-                  ),
-                ],
-              ),
-              const Divider(),
-              if (hasData) ...[
-                ...r.values.map(
-                  (val) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(val.description, style: const TextStyle(fontWeight: FontWeight.w500)),
-                        Text(
-                          "${val.value.toStringAsFixed(3)} ${val.unit}", // 3 Hane Hassasiyet
-                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo, fontSize: 16),
-                        ),
-                      ],
-                    ),
-                  ),
+    return Card(
+      elevation: 3,
+      margin: const EdgeInsets.all(8),
+      color: hasData ? Colors.green[50] : Colors.white,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text("SERİ: ${r.serialNumber}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                Text(
+                  r.manufacturer,
+                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey),
                 ),
-              ] else ...[
-                const Text("Veri Bekleniyor...", style: TextStyle(color: Colors.redAccent)),
               ],
-              const SizedBox(height: 5),
-              // RAW veriyi kopyalamak için tıklanabilir alan
-              InkWell(
-                onTap: () => Clipboard.setData(ClipboardData(text: r.rawHex)),
-                child: Text(
-                  "RAW: ${r.rawHex}",
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 10, color: Colors.grey),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+            ),
+            const Divider(),
+            if (hasData) ...[
+              ...r.values.map(
+                (val) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(val.description),
+                      Text(
+                        "${val.value} ${val.unit}",
+                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo),
+                      ),
+                    ],
+                  ),
                 ),
               ),
+            ] else ...[
+              const Text("Veri Bekleniyor...", style: TextStyle(color: Colors.redAccent)),
             ],
-          ),
+            const SizedBox(height: 5),
+            InkWell(
+              onTap: () => Clipboard.setData(ClipboardData(text: r.rawHex)),
+              child: Text(
+                "RAW: ${r.rawHex}",
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 10, color: Colors.grey),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
         ),
       ),
     );

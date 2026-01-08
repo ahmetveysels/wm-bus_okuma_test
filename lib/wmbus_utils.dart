@@ -1,4 +1,5 @@
-/// Yardımcı Araçlar
+// Dosya: lib/wmbus_utils.dart
+
 class WMBusUtils {
   static String toHexString(List<int> data) {
     return data.map((b) => b.toRadixString(16).toUpperCase().padLeft(2, '0')).join(' ');
