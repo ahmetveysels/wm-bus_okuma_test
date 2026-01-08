@@ -12,12 +12,12 @@ class WMBusParser {
 
   // --- C# Dosyasından Alınan AES Anahtarları (128-bit) ---
   static final List<String> _aesKeys = [
-    "51728910E66D83F851728910E66D83F8",
+    "51728910E66D83F851728910E66D83F8", // Diehl Standard (En Olası)
     "614467726164754D70726F58694D754D",
-    "39BC8A10E66D83F839BC8A10E66D83F8",
+    "39BC8A10E66D83F839BC8A10E66D83F8", // Izar
     "CE2922F434379405B89613381FD65352",
     "CE2922F434379405A89613381FD65352",
-    "12345678901234561234567890123456",
+    "12345678901234561234567890123456", // HYD Madenerji
     "12345678901234567890123456789012",
     "2A687141495A2A502F5D773E7E247C5E",
     "2F656E3C6D5E7321754E64563D57532B",
@@ -186,17 +186,7 @@ class WMBusParser {
         return _parseTechemCompact(workingFrame, manufacturer, serialNumber, version, typeByte, ciField);
       }
 
-      // --- ŞİFRE ÇÖZME ---
-      if (manufacturer == "HYD" || manufacturer == "DFS" || manufacturer == "SAP" || manufacturer == "DME") {
-        List<int>? decryptedLFSR = _tryDecryptDiehlLFSR(workingFrame, headerOffset);
-        if (decryptedLFSR != null) {
-          workingFrame = decryptedLFSR;
-          wasDecrypted = true;
-          encryptionStatus = "Çözüldü (Diehl LFSR)";
-          currentIndex = headerOffset + 15;
-        }
-      }
-
+      // --- ŞİFRE ÇÖZME 1: AES (Önce bunu dene çünkü logda AES 05 modu görüldü) ---
       if (!wasDecrypted) {
         if (ciField == 0x7A && frame.length > headerOffset + 15) {
           int tCount = frame[headerOffset + 11];
@@ -208,8 +198,10 @@ class WMBusParser {
             List<int> ivHeader = frame.sublist(headerOffset + 2, headerOffset + 10);
             List<int> ivTCount = List.filled(8, tCount);
             List<int> iv = [...ivHeader, ...ivTCount];
+
             int payloadStart = headerOffset + 15;
             List<int> encryptedPayload = frame.sublist(payloadStart);
+
             List<int>? decrypted = _tryDecryptAES(encryptedPayload, iv);
             if (decrypted != null) {
               workingFrame = [...frame.sublist(0, payloadStart), ...decrypted];
@@ -217,7 +209,7 @@ class WMBusParser {
               encryptionStatus = "Çözüldü (AES)";
               currentIndex = payloadStart;
             } else {
-              encryptionStatus = "Şifre Çözülemedi (Key Bulunamadı)";
+              encryptionStatus = "Şifre Çözülemedi (AES Key Yok)";
             }
           }
         } else if (ciField == 0x72 && frame.length > headerOffset + 23) {
@@ -255,6 +247,17 @@ class WMBusParser {
             }
             if (isIdRepeated) currentIndex += 12;
           }
+        }
+      }
+
+      // --- ŞİFRE ÇÖZME 2: Diehl LFSR (AES tutmadıysa) ---
+      if (!wasDecrypted && (manufacturer == "HYD" || manufacturer == "DFS" || manufacturer == "SAP" || manufacturer == "DME")) {
+        List<int>? decryptedLFSR = _tryDecryptDiehlLFSR_DualMode(workingFrame, headerOffset);
+        if (decryptedLFSR != null) {
+          workingFrame = decryptedLFSR;
+          wasDecrypted = true;
+          encryptionStatus = "Çözüldü (Diehl LFSR)";
+          currentIndex = headerOffset + 15;
         }
       }
 
@@ -331,7 +334,6 @@ class WMBusParser {
                 strValue = _parseDateTypeF(dataBytes);
               else if (dataLen == 2)
                 strValue = _parseDateTypeG(dataBytes);
-              // DÜZELTME: Tarihi stringValue'ya atıyoruz
               parsedValues.add(MeterValue(0, "", desc, stringValue: strValue));
             } else {
               if (isBCD)
@@ -453,8 +455,8 @@ class WMBusParser {
     );
   }
 
-  // --- Diehl LFSR (Big Endian Fix) ---
-  List<int>? _tryDecryptDiehlLFSR(List<int> frame, int headerOffset) {
+  // --- Diehl LFSR (Dual Mode) ---
+  List<int>? _tryDecryptDiehlLFSR_DualMode(List<int> frame, int headerOffset) {
     int dataStart = headerOffset + 15;
     if (frame.length <= dataStart) return null;
 
@@ -462,51 +464,74 @@ class WMBusParser {
     List<int> header = frame.sublist(headerOffset, dataStart);
 
     for (String keyHex in _diehlKeys) {
-      try {
-        List<int> keyBytes = WMBusUtils.hexToBytes(keyHex);
-        int seed1 = _toUInt32BE(keyBytes, 0);
-        int seed2 = _toUInt32BE(keyBytes, 4);
-        int key = seed1 ^ seed2;
+      List<int> keyBytes = WMBusUtils.hexToBytes(keyHex);
+      var res1 = _runDiehlAlgo(payload, header, keyBytes, true);
+      if (res1 != null) return [...frame.sublist(0, dataStart), ...res1];
+      var res2 = _runDiehlAlgo(payload, header, keyBytes, false);
+      if (res2 != null) return [...frame.sublist(0, dataStart), ...res2];
+    }
+    return null;
+  }
 
-        int part1 = _toUInt32BE(header, 2);
-        int part2 = _toUInt32BE(header, 6);
-        int part3 = _toUInt32BE(header, 10);
+  List<int>? _runDiehlAlgo(List<int> payload, List<int> header, List<int> keyBytes, bool bigEndian) {
+    try {
+      int seed1 = bigEndian ? _toUInt32BE(keyBytes, 0) : _toUInt32(keyBytes, 0);
+      int seed2 = bigEndian ? _toUInt32BE(keyBytes, 4) : _toUInt32(keyBytes, 4);
+      int key = seed1 ^ seed2;
 
-        key ^= part1;
-        key ^= part2;
-        key ^= part3;
+      int part1 = bigEndian ? _toUInt32BE(header, 2) : _toUInt32(header, 2);
+      int part2 = bigEndian ? _toUInt32BE(header, 6) : _toUInt32(header, 6);
+      int part3 = bigEndian ? _toUInt32BE(header, 10) : _toUInt32(header, 10);
 
-        List<int> decoded = List.from(payload);
+      key ^= part1;
+      key ^= part2;
+      key ^= part3;
 
-        for (int i = 0; i < decoded.length; i++) {
-          for (int j = 0; j < 8; j++) {
-            bool bit = ((key & 0x2) != 0) ^ ((key & 0x4) != 0) ^ ((key & 0x800) != 0) ^ ((key & 0x80000000) != 0);
-            key = ((key << 1) & 0xFFFFFFFF) | (bit ? 1 : 0);
-          }
-          decoded[i] = (payload[i] ^ (key & 0xFF)) & 0xFF;
+      List<int> decoded = List.from(payload);
+
+      for (int i = 0; i < decoded.length; i++) {
+        for (int j = 0; j < 8; j++) {
+          bool bit = ((key & 0x2) != 0) ^ ((key & 0x4) != 0) ^ ((key & 0x800) != 0) ^ ((key & 0x80000000) != 0);
+          key = ((key << 1) & 0xFFFFFFFF) | (bit ? 1 : 0);
         }
-
-        if (decoded.isNotEmpty && decoded[0] == 0x4B) {
-          List<int> newFrame = [...frame.sublist(0, dataStart), ...decoded];
-          return newFrame;
-        }
-      } catch (e) {
-        continue;
+        decoded[i] = (payload[i] ^ (key & 0xFF)) & 0xFF;
       }
+
+      if (decoded.isNotEmpty) {
+        int firstByte = decoded[0];
+        if (firstByte == 0x4B || firstByte == 0x2F || (firstByte >= 0x00 && firstByte <= 0x0F)) {
+          return decoded;
+        }
+      }
+    } catch (e) {
+      return null;
     }
     return null;
   }
 
   // --- AES Decryption ---
   List<int>? _tryDecryptAES(List<int> encryptedData, List<int> iv) {
-    if (encryptedData.isEmpty || encryptedData.length % 16 != 0) return null;
+    if (encryptedData.isEmpty) return null;
 
-    for (String keyHex in _aesKeys) {
+    List<int> dataToDecrypt = List.from(encryptedData);
+    if (dataToDecrypt.length % 16 != 0) {
+      int newLen = (dataToDecrypt.length ~/ 16) * 16;
+      if (newLen == 0) return null;
+      dataToDecrypt = dataToDecrypt.sublist(0, newLen);
+    }
+
+    Set<String> allKeysToTry = {};
+    allKeysToTry.addAll(_aesKeys);
+    for (var dk in _diehlKeys) {
+      allKeysToTry.add(dk + dk);
+    }
+
+    for (String keyHex in allKeysToTry) {
       try {
         final key = enc.Key.fromBase16(keyHex);
         final ivObj = enc.IV(Uint8List.fromList(iv));
         final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc, padding: null));
-        final decrypted = encrypter.decryptBytes(enc.Encrypted(Uint8List.fromList(encryptedData)), iv: ivObj);
+        final decrypted = encrypter.decryptBytes(enc.Encrypted(Uint8List.fromList(dataToDecrypt)), iv: ivObj);
 
         if (decrypted.length > 2 && decrypted[0] == 0x2F && decrypted[1] == 0x2F) {
           return decrypted;
@@ -593,11 +618,12 @@ class WMBusParser {
     return value.toDouble();
   }
 
+  // YENİ: DÜZELTİLMİŞ Type G Parser (Ay Offset Düzeltildi)
   String _parseDateTypeG(List<int> bytes) {
     if (bytes.length < 2) return "";
     int val = bytes[0] | (bytes[1] << 8);
     int day = val & 0x1F;
-    int month = (val >> 8) & 0x0F;
+    int month = (val >> 5) & 0x0F; // Düzeltildi: >> 8 yerine >> 5
     int year = ((val >> 9) & 0x7F) + 2000;
     return "$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}";
   }

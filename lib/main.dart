@@ -359,7 +359,7 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("W-MBus Okuyucu"),
+        title: Text("W-MBus Okuyucu: ${_readings.length} Sayaç"),
         backgroundColor: Colors.indigo,
         actions: [
           IconButton(
@@ -472,59 +472,62 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
 
   Widget _buildMeterCard(MeterReading r) {
     bool hasData = r.values.isNotEmpty;
-    return Card(
-      elevation: 3,
-      margin: const EdgeInsets.all(8),
-      color: hasData ? Colors.green[50] : Colors.white,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text("SERİ: ${r.serialNumber}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                Text(
-                  r.manufacturer,
-                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey),
-                ),
-              ],
-            ),
-            const Divider(),
-            if (hasData) ...[
-              ...r.values.map((val) {
-                // EĞER STRINGVALUE DOLUYSA ONU GÖSTER (Tarih vb.)
-                String displayValue = val.stringValue.isNotEmpty ? val.stringValue : "${val.value} ${val.unit}";
-
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(val.description),
-                      Text(
-                        displayValue,
-                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo),
-                      ),
-                    ],
+    return InkWell(
+      onTap: () => Clipboard.setData(ClipboardData(text: r.toString())),
+      child: Card(
+        elevation: 3,
+        margin: const EdgeInsets.all(8),
+        color: hasData ? Colors.green[50] : Colors.white,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text("SERİ: ${r.serialNumber}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                  Text(
+                    r.manufacturer,
+                    style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey),
                   ),
-                );
-              }),
-            ] else ...[
-              const Text("Veri Bekleniyor...", style: TextStyle(color: Colors.redAccent)),
-            ],
-            const SizedBox(height: 5),
-            InkWell(
-              onTap: () => Clipboard.setData(ClipboardData(text: r.rawHex)),
-              child: Text(
-                "RAW: ${r.rawHex}",
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 10, color: Colors.grey),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                ],
               ),
-            ),
-          ],
+              const Divider(),
+              if (hasData) ...[
+                ...r.values.map((val) {
+                  // EĞER STRINGVALUE DOLUYSA ONU GÖSTER (Tarih vb.)
+                  String displayValue = val.stringValue.isNotEmpty ? val.stringValue : "${val.value} ${val.unit}";
+
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(val.description),
+                        Text(
+                          displayValue,
+                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ] else ...[
+                const Text("Veri Bekleniyor...", style: TextStyle(color: Colors.redAccent)),
+              ],
+              const SizedBox(height: 5),
+              InkWell(
+                onTap: () => Clipboard.setData(ClipboardData(text: r.rawHex)),
+                child: Text(
+                  "RAW: ${r.rawHex}",
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 10, color: Colors.grey),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
