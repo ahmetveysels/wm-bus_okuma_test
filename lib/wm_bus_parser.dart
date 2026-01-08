@@ -150,7 +150,6 @@ class WMBusParser {
     "00001000020000300004000050000600",
   ];
 
-  // --- Diehl / Hydrometer Özel Anahtarları (64-bit) ---
   static final List<String> _diehlKeys = ["51728910E66D83F8", "39BC8A10E66D83F8", "58721910E66D83F8"];
 
   MeterReading parseFrame(List<int> frame) {
@@ -182,13 +181,12 @@ class WMBusParser {
       bool wasDecrypted = false;
       String encryptionStatus = "Açık";
 
-      // --- TECHEM (TCH) KOMPAKT MOD KONTROLÜ (BİRİM DÜZELTİLDİ) ---
+      // --- TECHEM (TCH) KOMPAKT MOD ---
       if (manufacturer == "TCH" && (ciField == 0xA0 || ciField == 0xA1 || ciField == 0xA2)) {
         return _parseTechemCompact(workingFrame, manufacturer, serialNumber, version, typeByte, ciField);
       }
 
-      // --- ŞİFRE ÇÖZME İŞLEMLERİ ---
-      // 1. Diehl/HYD Özel Şifreleme (LFSR)
+      // --- ŞİFRE ÇÖZME ---
       if (manufacturer == "HYD" || manufacturer == "DFS" || manufacturer == "SAP" || manufacturer == "DME") {
         List<int>? decryptedLFSR = _tryDecryptDiehlLFSR(workingFrame, headerOffset);
         if (decryptedLFSR != null) {
@@ -199,7 +197,6 @@ class WMBusParser {
         }
       }
 
-      // 2. Standart AES Şifreleme (Mode 5)
       if (!wasDecrypted) {
         if (ciField == 0x7A && frame.length > headerOffset + 15) {
           int tCount = frame[headerOffset + 11];
@@ -211,10 +208,8 @@ class WMBusParser {
             List<int> ivHeader = frame.sublist(headerOffset + 2, headerOffset + 10);
             List<int> ivTCount = List.filled(8, tCount);
             List<int> iv = [...ivHeader, ...ivTCount];
-
             int payloadStart = headerOffset + 15;
             List<int> encryptedPayload = frame.sublist(payloadStart);
-
             List<int>? decrypted = _tryDecryptAES(encryptedPayload, iv);
             if (decrypted != null) {
               workingFrame = [...frame.sublist(0, payloadStart), ...decrypted];
@@ -235,10 +230,8 @@ class WMBusParser {
             List<int> ivHeader = frame.sublist(headerOffset + 2, headerOffset + 10);
             List<int> ivTCount = List.filled(8, tCount);
             List<int> iv = [...ivHeader, ...ivTCount];
-
             int payloadStart = headerOffset + 23;
             List<int> encryptedPayload = frame.sublist(payloadStart);
-
             List<int>? decrypted = _tryDecryptAES(encryptedPayload, iv);
             if (decrypted != null) {
               workingFrame = [...frame.sublist(0, payloadStart), ...decrypted];
@@ -265,7 +258,7 @@ class WMBusParser {
         }
       }
 
-      // --- STANDART PARSER DÖNGÜSÜ ---
+      // --- PARSING ---
       List<MeterValue> parsedValues = [];
 
       while (currentIndex < workingFrame.length - 1) {
@@ -338,14 +331,14 @@ class WMBusParser {
                 strValue = _parseDateTypeF(dataBytes);
               else if (dataLen == 2)
                 strValue = _parseDateTypeG(dataBytes);
-              parsedValues.add(MeterValue(0, "", "$desc: $strValue"));
+              // DÜZELTME: Tarihi stringValue'ya atıyoruz
+              parsedValues.add(MeterValue(0, "", desc, stringValue: strValue));
             } else {
               if (isBCD)
                 valDouble = _bcdToDouble(dataBytes);
               else
                 valDouble = _intToDouble(dataBytes);
 
-              // BİRİM DÜZELTMELERİ (Wh -> kWh ekledim)
               if ((vif & 0x7F) == 0x06)
                 unit = "kWh";
               else if ((vif & 0x7F) == 0x05) {
@@ -354,8 +347,7 @@ class WMBusParser {
               } else if ((vif & 0x7F) == 0x03) {
                 unit = "kWh";
                 valDouble /= 1000.0;
-              } // Wh -> kWh (HYD)
-              else if ((vif & 0x7F) == 0x13 || (vif & 0x7F) == 0x14) {
+              } else if ((vif & 0x7F) == 0x13 || (vif & 0x7F) == 0x14) {
                 unit = "m3";
                 valDouble /= 1000.0;
               } else if (vif == 0x2A) {
@@ -398,43 +390,35 @@ class WMBusParser {
     }
   }
 
-  // --- YENİ: Techem Compact Parser (BİRİM DÜZELTİLDİ) ---
+  // --- Techem Compact ---
   MeterReading _parseTechemCompact(List<int> frame, String man, String serial, int ver, int type, int ci) {
     List<MeterValue> vals = [];
     int offset = 0;
     if (frame[0] == 0x68) offset = 4;
 
     try {
-      // Techem Compact Mod: 14. byte'tan itibaren veriler başlar
       if (frame.length > offset + 18) {
-        int val1 = _toUInt16(frame, offset + 14); // Güncel
-        int val2 = _toUInt16(frame, offset + 18); // Önceki
+        int val1 = _toUInt16(frame, offset + 14);
+        int val2 = _toUInt16(frame, offset + 18);
 
         double dVal1 = val1.toDouble();
         double dVal2 = val2.toDouble();
 
         String unit = "";
 
-        // --- BİRİM VE ÇARPAN AYARLARI ---
-        // Isı (Heat) tipleri
         if (type == 0x04 || (type >= 0x43 && type <= 0x45) || (type >= 0xA3 && type <= 0xA5) || (type >= 0xC3 && type <= 0xC5)) {
           unit = "kWh";
-
           if (type == 0x44 || type == 0xA4 || type == 0xC4) {
             if (val1 != 0) dVal1 *= 10;
             if (val2 != 0) dVal2 *= 10;
           }
-
-          // GJ to kWh (C# mantığı)
           if (type >= 0xC3 && type <= 0xC5) {
             if (val1 != 0) dVal1 = (dVal1 / 1000.0) / 0.0036;
             if (val2 != 0) dVal2 = (dVal2 / 1000.0) / 0.0036;
           } else if (type == 0x04 && val1 != 0) {
             dVal1 *= 10;
           }
-        }
-        // Su (Water) tipleri
-        else if (type == 0x07 || type == 0x06 || type == 0x16 || type == 0x15 || (type >= 0x60 && type <= 0x62) || (type >= 0x70 && type <= 0x72)) {
+        } else if (type == 0x07 || type == 0x06 || type == 0x16 || type == 0x15 || (type >= 0x60 && type <= 0x62) || (type >= 0x70 && type <= 0x72)) {
           unit = "m3";
           if (type == 0x70) {
             dVal1 /= 100.0;
@@ -443,9 +427,7 @@ class WMBusParser {
             dVal1 /= 10.0;
             dVal2 /= 10.0;
           }
-        }
-        // Payölçer (HCA)
-        else if (type == 0x08 || type == 0x80) {
+        } else if (type == 0x08 || type == 0x80) {
           unit = "birim";
         } else {
           unit = "Birim (${type.toRadixString(16).toUpperCase()})";
@@ -471,12 +453,7 @@ class WMBusParser {
     );
   }
 
-  int _toUInt16(List<int> bytes, int offset) {
-    if (offset + 2 > bytes.length) return 0;
-    return bytes[offset] | (bytes[offset + 1] << 8);
-  }
-
-  // --- Diehl / HYD LFSR Decryption Logic (DÜZELTİLDİ: BIG ENDIAN) ---
+  // --- Diehl LFSR (Big Endian Fix) ---
   List<int>? _tryDecryptDiehlLFSR(List<int> frame, int headerOffset) {
     int dataStart = headerOffset + 15;
     if (frame.length <= dataStart) return null;
@@ -487,12 +464,10 @@ class WMBusParser {
     for (String keyHex in _diehlKeys) {
       try {
         List<int> keyBytes = WMBusUtils.hexToBytes(keyHex);
-        // HATA DÜZELTME: C# kodu anahtarları Big Endian olarak işliyor (ToUInt32(..., true)).
         int seed1 = _toUInt32BE(keyBytes, 0);
         int seed2 = _toUInt32BE(keyBytes, 4);
         int key = seed1 ^ seed2;
 
-        // HATA DÜZELTME: Başlık parçaları da Big Endian olarak okunmalı.
         int part1 = _toUInt32BE(header, 2);
         int part2 = _toUInt32BE(header, 6);
         int part3 = _toUInt32BE(header, 10);
@@ -522,13 +497,7 @@ class WMBusParser {
     return null;
   }
 
-  // Helper: Big Endian UInt32 okuma (C# uyumluluğu için)
-  int _toUInt32BE(List<int> bytes, int offset) {
-    if (offset + 4 > bytes.length) return 0;
-    return (bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
-  }
-
-  // --- AES Mode 5 Decryption ---
+  // --- AES Decryption ---
   List<int>? _tryDecryptAES(List<int> encryptedData, List<int> iv) {
     if (encryptedData.isEmpty || encryptedData.length % 16 != 0) return null;
 
@@ -537,7 +506,6 @@ class WMBusParser {
         final key = enc.Key.fromBase16(keyHex);
         final ivObj = enc.IV(Uint8List.fromList(iv));
         final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc, padding: null));
-
         final decrypted = encrypter.decryptBytes(enc.Encrypted(Uint8List.fromList(encryptedData)), iv: ivObj);
 
         if (decrypted.length > 2 && decrypted[0] == 0x2F && decrypted[1] == 0x2F) {
@@ -550,7 +518,22 @@ class WMBusParser {
     return null;
   }
 
-  // --- YARDIMCI METOTLAR ---
+  // Helpers
+  int _toUInt32(List<int> bytes, int offset) {
+    if (offset + 4 > bytes.length) return 0;
+    return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24);
+  }
+
+  int _toUInt32BE(List<int> bytes, int offset) {
+    if (offset + 4 > bytes.length) return 0;
+    return (bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
+  }
+
+  int _toUInt16(List<int> bytes, int offset) {
+    if (offset + 2 > bytes.length) return 0;
+    return bytes[offset] | (bytes[offset + 1] << 8);
+  }
+
   int _getDataLengthBytes(int dif) {
     int type = dif & 0x0F;
     switch (type) {

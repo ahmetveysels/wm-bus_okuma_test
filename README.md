@@ -8,5 +8,5 @@ flutter pub get
 
 git init
 git add .
-git commit -m"tch ve qds okunuyor parse ediliyor"
+git commit -m"tch ve qds okunuyor Daha iyi sonuc"
 git push

@@ -4,7 +4,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:testrfidokuma/decode_page.dart';
 import 'package:usb_serial/usb_serial.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
@@ -12,9 +11,10 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'meter_model.dart';
 import 'module_config.dart';
 import 'wm_bus_parser.dart';
-// WMBusUtils sınıfı wm_bus_parser.dart veya wmbus_utils.dart içinde olabilir.
-// Eğer ayrı dosyadaysa import etmeyi unutmayın.
 import 'wmbus_utils.dart';
+
+// Eğer 'decode_page.dart' varsa import et, yoksa sil
+// import 'package:testrfidokuma/decode_page.dart';
 
 void main() {
   runApp(
@@ -229,16 +229,14 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
     String hexRaw = WMBusUtils.toHexString(data);
     _addLog("RX: $hexRaw");
 
-    // 1. Konfigürasyon Modu
     if (_isConfiguring) {
       bool isConfigComplete = false;
       ModuleProtocol proto = _selectedModule?.protocol ?? ModuleProtocol.standard;
 
       if (proto == ModuleProtocol.amber) {
-        // Amber genelde FF ile cevap döner (ACK)
         if (data.isNotEmpty && data[0] == 0xFF) isConfigComplete = true;
       } else if (proto == ModuleProtocol.radiocrafts) {
-        if (data.contains(0x3E)) isConfigComplete = true; // '>'
+        if (data.contains(0x3E)) isConfigComplete = true;
       } else {
         if (data.isNotEmpty) isConfigComplete = true;
       }
@@ -257,59 +255,45 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
       _rxBuffer.clear();
     }
 
-    // --- PROTOKOLE GÖRE AYRIŞTIRMA ---
     ModuleProtocol proto = _selectedModule?.protocol ?? ModuleProtocol.standard;
 
-    // A. AMBER (Özel Durum: FF... veya Direkt Veri)
+    // Amber Protokolü (FF varsa temizle)
     if (proto == ModuleProtocol.amber) {
-      // Amber şeffaf moddaysa direkt M-Bus verisi basar (Standard gibi).
-      // Ancak bazen FF ile başlayan komut/durum mesajı da atabilir.
       while (_rxBuffer.isNotEmpty) {
         if (_rxBuffer[0] == 0xFF) {
-          // Bu bir Amber sistem mesajıdır (ACK, Status vb.), M-Bus verisi değildir.
-          // C# mantığına göre bunu atlamalıyız. Genelde [1] byte uzunluktur.
           if (_rxBuffer.length > 2) {
-            int cmdLen = _rxBuffer[1]; // Payload length
-            // Toplam: FF + Len + Payload + (Bazen +1 CS)
-            // Basitçe FF'i ve peşindekileri temizleyelim
             _rxBuffer.removeAt(0);
             continue;
           } else {
-            break; // Veri eksik
+            break;
           }
         }
-        // FF ile başlamıyorsa standart M-Bus paketidir. Aşağıdaki döngüye girmesi için break.
         break;
       }
     }
 
-    // B. PAKET AYIKLAMA (Tüm Modüller İçin Ortak)
     while (_rxBuffer.isNotEmpty) {
       int startIndex = -1;
       int lengthByte = 0;
       int frameOffset = 0;
 
-      // 1. RADIOCRAFTS (0x68 veya Length)
       if (proto == ModuleProtocol.radiocrafts) {
         startIndex = _rxBuffer.indexOf(0x68);
         if (startIndex != -1 && _rxBuffer.length > startIndex + 1) {
           lengthByte = _rxBuffer[startIndex + 1];
-          frameOffset = 2; // 68 + Len
+          frameOffset = 2;
         } else if (_rxBuffer.isNotEmpty && _rxBuffer[0] >= 10) {
           startIndex = 0;
           lengthByte = _rxBuffer[0];
-          frameOffset = 1; // Sadece Len
+          frameOffset = 1;
         }
-      }
-      // 2. STANDART / AMBER (Direkt Length)
-      else {
-        // M-Bus paketi min 10 byte olur. İlk byte uzunluktur.
+      } else {
         if (_rxBuffer.isNotEmpty && _rxBuffer[0] > 9 && _rxBuffer[0] < 255) {
           startIndex = 0;
           lengthByte = _rxBuffer[0];
           frameOffset = 1;
         } else {
-          _rxBuffer.removeAt(0); // Çöp veri
+          _rxBuffer.removeAt(0);
           continue;
         }
       }
@@ -318,7 +302,7 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
       if (startIndex > 0) _rxBuffer.removeRange(0, startIndex);
 
       int totalLen = frameOffset + lengthByte;
-      if (_rxBuffer.length < totalLen) break; // Paket tamamlanmadı
+      if (_rxBuffer.length < totalLen) break;
 
       List<int> frameForParser = _rxBuffer.sublist(0, totalLen);
       _rxBuffer.removeRange(0, totalLen);
@@ -337,17 +321,20 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
       int index = _readings.indexWhere((r) => r.serialNumber == result.serialNumber);
 
       if (index != -1) {
-        // --- KRİTİK DÜZELTME: Veri Varsa Güncelle ---
         if (result.values.isNotEmpty) {
           _readings[index] = result;
-          String valText = "${result.values.first.value} ${result.values.first.unit}";
+
+          String valText = "";
+          if (result.values.first.stringValue.isNotEmpty) {
+            valText = result.values.first.stringValue;
+          } else {
+            valText = "${result.values.first.value} ${result.values.first.unit}";
+          }
           _addLog("GÜNCEL: ${result.serialNumber} -> $valText");
         } else {
-          // Veri yoksa (Sinyal paketi), eski veriyi koru!
           _addLog("SİNYAL: ${result.serialNumber} (Veri bloğu yok - Eski değer korundu)");
         }
       } else {
-        // Yeni sayaç
         if (result.serialNumber != "00000000") {
           _readings.add(result);
           String info = result.values.isNotEmpty ? "Veri Var" : "Veri Bekleniyor...";
@@ -371,12 +358,6 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      floatingActionButton: FloatingActionButton(
-        child: const Icon(Icons.usb),
-        onPressed: () {
-          Navigator.push(context, MaterialPageRoute(builder: (context) => const DecodePage()));
-        },
-      ),
       appBar: AppBar(
         title: const Text("W-MBus Okuyucu"),
         backgroundColor: Colors.indigo,
@@ -431,6 +412,12 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
             ),
           ),
         ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        child: const Icon(Icons.usb),
+        onPressed: () {
+          // Navigator.push(context, MaterialPageRoute(builder: (context) => const DecodePage()));
+        },
       ),
     );
   }
@@ -506,21 +493,24 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
             ),
             const Divider(),
             if (hasData) ...[
-              ...r.values.map(
-                (val) => Padding(
+              ...r.values.map((val) {
+                // EĞER STRINGVALUE DOLUYSA ONU GÖSTER (Tarih vb.)
+                String displayValue = val.stringValue.isNotEmpty ? val.stringValue : "${val.value} ${val.unit}";
+
+                return Padding(
                   padding: const EdgeInsets.symmetric(vertical: 2),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(val.description),
                       Text(
-                        "${val.value} ${val.unit}",
+                        displayValue,
                         style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo),
                       ),
                     ],
                   ),
-                ),
-              ),
+                );
+              }),
             ] else ...[
               const Text("Veri Bekleniyor...", style: TextStyle(color: Colors.redAccent)),
             ],

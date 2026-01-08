@@ -39,6 +39,7 @@ class MeterReading {
       error: errorMessage,
     );
   }
+
   @override
   String toString() {
     StringBuffer sb = StringBuffer();
@@ -52,7 +53,8 @@ class MeterReading {
       sb.writeln("  (Değer yok veya ayrıştırılamadı)");
     } else {
       for (var v in values) {
-        sb.writeln("  * ${v.description.padRight(22)} : ${v.value} ${v.unit}");
+        String valStr = v.stringValue.isNotEmpty ? v.stringValue : "${v.value} ${v.unit}";
+        sb.writeln("  * ${v.description.padRight(22)} : $valStr");
       }
     }
     if (error != null) sb.writeln("!!! HATA: $error !!!");
@@ -61,14 +63,15 @@ class MeterReading {
   }
 }
 
-/// Sayacın içindeki her bir ölçüm değerini temsil eder (Tüketim, Hacim vb.)
+/// Sayacın içindeki her bir ölçüm değerini temsil eder.
 class MeterValue {
-  final double value;
-  final String unit;
-  final String description;
+  final double value;       // Sayısal değer (Tüketim, Hacim vb.)
+  final String stringValue; // Metinsel değer (Tarih, Zaman vb.) - YENİ
+  final String unit;        // Birim (kWh, m3, °C)
+  final String description; // Açıklama (Enerji, Hacim vb.)
 
-  MeterValue(this.value, this.unit, this.description);
+  MeterValue(this.value, this.unit, this.description, {this.stringValue = ""});
 
   @override
-  String toString() => 'MeterValue(value: $value, unit: $unit, description: $description)';
+  String toString() => 'MeterValue(val: $value, str: $stringValue, unit: $unit)';
 }
