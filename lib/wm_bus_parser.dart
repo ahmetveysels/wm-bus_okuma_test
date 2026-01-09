@@ -330,20 +330,22 @@ class WMBusParser {
             String desc = _getDescriptionFromVIF(vif, isReturnTemp);
 
             if (isDate) {
-              if (dataLen == 4)
+              if (dataLen == 4) {
                 strValue = _parseDateTypeF(dataBytes);
-              else if (dataLen == 2)
+              } else if (dataLen == 2) {
                 strValue = _parseDateTypeG(dataBytes);
+              }
               parsedValues.add(MeterValue(0, "", desc, stringValue: strValue));
             } else {
-              if (isBCD)
+              if (isBCD) {
                 valDouble = _bcdToDouble(dataBytes);
-              else
+              } else {
                 valDouble = _intToDouble(dataBytes);
+              }
 
-              if ((vif & 0x7F) == 0x06)
+              if ((vif & 0x7F) == 0x06) {
                 unit = "kWh";
-              else if ((vif & 0x7F) == 0x05) {
+              } else if ((vif & 0x7F) == 0x05) {
                 unit = "kWh";
                 valDouble /= 10.0;
               } else if ((vif & 0x7F) == 0x03) {

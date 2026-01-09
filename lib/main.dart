@@ -7,14 +7,10 @@ import 'package:flutter/services.dart';
 import 'package:usb_serial/usb_serial.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-// Kendi proje dosyaların
 import 'meter_model.dart';
 import 'module_config.dart';
 import 'wm_bus_parser.dart';
 import 'wmbus_utils.dart';
-
-// Eğer 'decode_page.dart' varsa import et, yoksa sil
-// import 'package:testrfidokuma/decode_page.dart';
 
 void main() {
   runApp(
@@ -67,7 +63,7 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
   final ScrollController _logScrollController = ScrollController();
   final List<MeterReading> _readings = [];
 
-  // Hedef Sayaç Listesi
+  // Hedef Sayaç Listesi (Boş)
   final List<String> _targetSerials = [];
 
   bool _isConnected = false;
@@ -93,7 +89,18 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
   void _resetMeterList() {
     _readings.clear();
     for (var serial in _targetSerials) {
-      _readings.add(MeterReading(manufacturer: "", serialNumber: serial, deviceType: "", version: 0, encryption: "Bekleniyor", frameType: "", values: [], parseTime: DateTime.now()));
+      _readings.add(
+        MeterReading(
+          manufacturer: "",
+          serialNumber: serial,
+          deviceType: "",
+          version: 0,
+          encryption: "Bekleniyor",
+          frameType: "",
+          values: [],
+          parseTime: DateTime.now(),
+        ),
+      );
     }
   }
 
@@ -229,6 +236,7 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
     String hexRaw = WMBusUtils.toHexString(data);
     _addLog("RX: $hexRaw");
 
+    // Konfigürasyon Modu
     if (_isConfiguring) {
       bool isConfigComplete = false;
       ModuleProtocol proto = _selectedModule?.protocol ?? ModuleProtocol.standard;
@@ -257,57 +265,90 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
 
     ModuleProtocol proto = _selectedModule?.protocol ?? ModuleProtocol.standard;
 
-    // Amber Protokolü (FF varsa temizle)
-    if (proto == ModuleProtocol.amber) {
-      while (_rxBuffer.isNotEmpty) {
-        if (_rxBuffer[0] == 0xFF) {
-          if (_rxBuffer.length > 2) {
-            _rxBuffer.removeAt(0);
-            continue;
-          } else {
-            break;
-          }
+    // --- RADIOCRAFTS (FIX) ---
+    if (proto == ModuleProtocol.radiocrafts) {
+      while (_rxBuffer.length >= 5) {
+        int start = _rxBuffer.indexOf(0x68);
+
+        if (start == -1) {
+          _rxBuffer.clear();
+          break;
         }
-        break;
+
+        if (start > 0) {
+          _rxBuffer.removeRange(0, start); // Öncesini temizle
+          continue;
+        }
+
+        if (_rxBuffer.length < 2) break;
+        int length = _rxBuffer[1]; // DÜZELTİLDİ
+
+        if (_rxBuffer.length < length + 3) break;
+
+        if (_rxBuffer[length + 2] != 0x16) {
+          _rxBuffer.removeAt(0); // Paket bozuk
+          continue;
+        }
+
+        List<int> packet = _rxBuffer.sublist(1, 1 + length);
+        packet[0] = (packet[0] - 1) & 0xFF; // Fix: Length - 1
+
+        _processParsedFrame(packet);
+
+        _rxBuffer.removeRange(0, length + 3);
+      }
+      return;
+    }
+
+    // --- AMBER MODÜLÜ (RAW SUPPORT EKLENDİ) ---
+    if (proto == ModuleProtocol.amber) {
+      while (_rxBuffer.length >= 5) {
+        // 1. Durum: WRAPPED (FF 03 L ...)
+        if (_rxBuffer[0] == 0xFF && _rxBuffer.length > 3 && _rxBuffer[1] == 0x03) {
+          int L = _rxBuffer[2];
+          if (_rxBuffer.length < L + 4) break; // Veri bekleniyor
+
+          List<int> packet = _rxBuffer.sublist(2, 2 + L);
+          packet[0] = (packet[0] - 1) & 0xFF; // C# Amber Fix: L-1
+
+          _processParsedFrame(packet);
+          _rxBuffer.removeRange(0, L + 4);
+          continue;
+        }
+
+        // 2. Durum: RAW M-BUS
+        // int L = _rxBuffer[0];
+
+        if (_rxBuffer[0] != 0xFF) {
+          break;
+        }
+
+        _rxBuffer.removeAt(0);
       }
     }
 
-    while (_rxBuffer.isNotEmpty) {
+    // --- GENEL PARSER (Standard / Amber Raw / Telit) ---
+    while (_rxBuffer.isNotEmpty && proto != ModuleProtocol.radiocrafts) {
       int startIndex = -1;
       int lengthByte = 0;
       int frameOffset = 0;
 
-      if (proto == ModuleProtocol.radiocrafts) {
-        startIndex = _rxBuffer.indexOf(0x68);
-        if (startIndex != -1 && _rxBuffer.length > startIndex + 1) {
-          lengthByte = _rxBuffer[startIndex + 1];
-          frameOffset = 2;
-        } else if (_rxBuffer.isNotEmpty && _rxBuffer[0] >= 10) {
-          startIndex = 0;
-          lengthByte = _rxBuffer[0];
-          frameOffset = 1;
-        }
+      if (_rxBuffer.isNotEmpty && _rxBuffer[0] > 9 && _rxBuffer[0] < 255) {
+        startIndex = 0;
+        lengthByte = _rxBuffer[0];
+        frameOffset = 1;
       } else {
-        if (_rxBuffer.isNotEmpty && _rxBuffer[0] > 9 && _rxBuffer[0] < 255) {
-          startIndex = 0;
-          lengthByte = _rxBuffer[0];
-          frameOffset = 1;
-        } else {
-          _rxBuffer.removeAt(0);
-          continue;
-        }
+        _rxBuffer.removeAt(0);
+        continue;
       }
 
-      if (startIndex == -1) break;
-      if (startIndex > 0) _rxBuffer.removeRange(0, startIndex);
-
       int totalLen = frameOffset + lengthByte;
+
       if (_rxBuffer.length < totalLen) break;
 
       List<int> frameForParser = _rxBuffer.sublist(0, totalLen);
-      _rxBuffer.removeRange(0, totalLen);
-
       _processParsedFrame(frameForParser);
+      _rxBuffer.removeRange(0, totalLen);
     }
   }
 
@@ -317,6 +358,20 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
     if (result.error != null) return;
     if (result.manufacturer == "UNK") return;
 
+    // --- FİLTRE: TÜKETİM YOKSA GÖSTERME (AKTİF EDİLDİ) ---
+    // Eğer 'values' listesinde kWh, m3, wh birimli veya "enerji", "hacim" açıklamalı bir veri yoksa,
+    // bu okumayı KAYDETME. Sadece Tarih/Saat veya Durum (Error flags) gelmiş olabilir.
+    bool hasConsumption = result.values.any((val) {
+      String u = val.unit.toLowerCase();
+      String d = val.description.toLowerCase();
+      return u.contains("kwh") || u.contains("m3") || u.contains("wh") || d.contains("enerji") || d.contains("hacim") || d.contains("volume") || d.contains("energy");
+    });
+
+    if (!hasConsumption) {
+      _addLog("SİNYAL: ${result.serialNumber} (Enerji/Hacim verisi yok, atlandı)");
+      return; // İŞLEMİ DURDUR
+    }
+
     setState(() {
       int index = _readings.indexWhere((r) => r.serialNumber == result.serialNumber);
 
@@ -325,19 +380,19 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
           _readings[index] = result;
 
           String valText = "";
-          if (result.values.first.stringValue.isNotEmpty) {
-            valText = result.values.first.stringValue;
+          var primaryVal = result.values.firstWhere((v) => v.unit.isNotEmpty, orElse: () => result.values.first);
+
+          if (primaryVal.stringValue.isNotEmpty) {
+            valText = primaryVal.stringValue;
           } else {
-            valText = "${result.values.first.value} ${result.values.first.unit}";
+            valText = "${primaryVal.value} ${primaryVal.unit}";
           }
           _addLog("GÜNCEL: ${result.serialNumber} -> $valText");
-        } else {
-          _addLog("SİNYAL: ${result.serialNumber} (Veri bloğu yok - Eski değer korundu)");
         }
       } else {
         if (result.serialNumber != "00000000") {
           _readings.add(result);
-          String info = result.values.isNotEmpty ? "Veri Var" : "Veri Bekleniyor...";
+          String info = result.values.isNotEmpty ? "Veri Var" : "Bekleniyor";
           _addLog("YENİ: ${result.serialNumber} ($info)");
         }
       }
@@ -496,7 +551,6 @@ class _WirelessMBusAppState extends State<WirelessMBusApp> {
               const Divider(),
               if (hasData) ...[
                 ...r.values.map((val) {
-                  // EĞER STRINGVALUE DOLUYSA ONU GÖSTER (Tarih vb.)
                   String displayValue = val.stringValue.isNotEmpty ? val.stringValue : "${val.value} ${val.unit}";
 
                   return Padding(
